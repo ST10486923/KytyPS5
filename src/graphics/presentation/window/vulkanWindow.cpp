@@ -1,20 +1,6 @@
-#include "SDL.h"
-#include "SDL_error.h"
-#include "SDL_events.h"
-#include "SDL_gamecontroller.h"
-#include "SDL_hints.h"
-#include "SDL_joystick.h"
-#include "SDL_keyboard.h"
-#include "SDL_keycode.h"
-#include "SDL_mouse.h"
-#include "SDL_pixels.h"
-#include "SDL_rwops.h"
-#include "SDL_stdinc.h"
-#include "SDL_surface.h"
-#include "SDL_thread.h"
-#include "SDL_touch.h"
-#include "SDL_video.h"
-#include "SDL_vulkan.h"
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
+
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
@@ -49,7 +35,6 @@
 // IWYU pragma: no_include <intrin.h>
 
 #define KYTY_ENABLE_DEBUG_PRINTF
-#define KYTY_DBG_INPUT
 
 namespace Libs::Graphics {
 
@@ -201,6 +186,8 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 		vk::PhysicalDeviceVulkan13Features features13 {};
 
 		vk::PhysicalDeviceColorWriteEnableFeaturesEXT color_write_ext {};
+		vk::PhysicalDeviceImageViewMinLodFeaturesEXT  image_view_min_lod {};
+		color_write_ext.pNext = &image_view_min_lod;
 
 		vk::PhysicalDeviceDepthClipEnableFeaturesEXT depth_clip_enable {};
 		depth_clip_enable.pNext = &color_write_ext;
@@ -235,6 +222,10 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 			skip_device = true;
 #endif
 		}
+		if (image_view_min_lod.minLod != VK_TRUE) {
+			LOGF("image view minLod is not supported\n");
+			skip_device = true;
+		}
 
 		if (depth_clip_control.depthClipControl != VK_TRUE) {
 			LOGF("depthClipControl is not supported\n");
@@ -247,6 +238,10 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 #endif
 		}
 #if !defined(__APPLE__)
+		if (device_features2.features.depthClamp != VK_TRUE) {
+			LOGF("depthClamp is not supported\n");
+			skip_device = true;
+		}
 		if (fragment_barycentric.fragmentShaderBarycentric != VK_TRUE) {
 			LOGF("fragmentShaderBarycentric is not supported\n");
 			skip_device = true;
@@ -514,11 +509,14 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	depth_clip_enable.depthClipEnable = VK_TRUE;
 
 	vk::PhysicalDeviceDepthClipControlFeaturesEXT depth_clip_control {};
+	vk::PhysicalDeviceImageViewMinLodFeaturesEXT  image_view_min_lod {};
+	image_view_min_lod.minLod = VK_TRUE;
+	depth_clip_control.pNext  = &image_view_min_lod;
 	// MoltenVK lacks VK_EXT_depth_clip_enable and VK_EXT_color_write_enable, so drop those
 	// feature structs from the chain on macOS (the renderer falls back to default depth
 	// clipping and static color-write masks).
 #if !defined(__APPLE__)
-	depth_clip_control.pNext = &depth_clip_enable;
+	image_view_min_lod.pNext = &depth_clip_enable;
 #endif
 	depth_clip_control.depthClipControl = VK_TRUE;
 
@@ -566,8 +564,10 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	vk::PhysicalDeviceVulkan11Properties properties11 {};
 	properties11.pNext = &subgroup_size_control;
 
+	vk::PhysicalDeviceFloatControlsProperties float_controls {};
+	float_controls.pNext = &properties11;
 	vk::PhysicalDeviceProperties2 properties2 {};
-	properties2.pNext = &properties11;
+	properties2.pNext = &float_controls;
 
 	if (graphics.mesh_shader_enabled) {
 		subgroup_size_control.pNext = &graphics.mesh_shader_properties;
@@ -602,20 +602,23 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		     graphics.mesh_shader_properties.maxMeshOutputPrimitives,
 		     graphics.mesh_shader_properties.maxMeshSharedMemorySize);
 	}
-	// VulkanFindPhysicalDevice already checked the required creation features. These two
+	// VulkanFindPhysicalDevice already checked the required creation features. These
 	// requirements are specific to this creation path and are not part of device selection.
 	EXIT_NOT_IMPLEMENTED(supported_features2.features.shaderInt64 != VK_TRUE);
 	EXIT_NOT_IMPLEMENTED(supported_features2.features.vertexPipelineStoresAndAtomics != VK_TRUE);
+	EXIT_NOT_IMPLEMENTED(supported_features2.features.dualSrcBlend != VK_TRUE);
 	vk::PhysicalDeviceFeatures device_features {};
 	device_features.fragmentStoresAndAtomics = VK_TRUE;
 	device_features.samplerAnisotropy        = VK_TRUE;
 	device_features.robustBufferAccess       = VK_TRUE;
 #if !defined(__APPLE__)
 	device_features.depthBounds = VK_TRUE; // unsupported by MoltenVK
+	device_features.depthClamp  = VK_TRUE;
 #endif
 	device_features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
 	device_features.shaderImageGatherExtended            = VK_TRUE;
 	device_features.independentBlend                     = VK_TRUE;
+	device_features.dualSrcBlend                         = VK_TRUE;
 	device_features.tessellationShader                   = VK_TRUE;
 	device_features.sampleRateShading                    = VK_TRUE;
 	device_features.depthBiasClamp                       = VK_TRUE;
@@ -627,6 +630,15 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	device_features.vertexPipelineStoresAndAtomics       = VK_TRUE;
 	graphics.sample_rate_shading_enabled                 = true;
 	device_features.shaderInt64 = VK_TRUE;
+	device_features.shaderFloat64 =
+	    supported_features2.features.shaderFloat64 &&
+	    float_controls.shaderSignedZeroInfNanPreserveFloat64 &&
+	    float_controls.shaderRoundingModeRTEFloat32;
+	// if (device_features.shaderFloat64 && !float_controls.shaderDenormPreserveFloat64) {
+	// 	Log::WriteToConsoleAndLog(
+	// 	    "WARNING: Vulkan device does not guarantee FP64 denormal preservation; "
+	// 	    "continuing with native FP64 arithmetic. Very small values may be flushed to zero.\n");
+	// }
 
 	vk::PhysicalDeviceRobustness2FeaturesEXT robustness2 {};
 #if defined(__APPLE__)
@@ -690,25 +702,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	return device;
 }
 
-static void VulkanGetExtensions(SDL_Window* window, VulkanExtensions& r) {
-	EXIT_IF(window == nullptr);
-
+static void VulkanGetExtensions(VulkanExtensions& r) {
 	uint32_t required_extensions_count = 0;
 
-	auto sdl_result = SDL_Vulkan_GetInstanceExtensions(window, &required_extensions_count, nullptr);
-
-	EXIT_NOT_IMPLEMENTED(sdl_result == SDL_FALSE);
+	const char* const* extensions = SDL_Vulkan_GetInstanceExtensions(&required_extensions_count);
+	EXIT_NOT_IMPLEMENTED(extensions == nullptr);
 	EXIT_NOT_IMPLEMENTED(required_extensions_count == 0);
-
-	r.required_extensions =
-	    std::vector<const char*>(required_extensions_count); // @suppress("Ambiguous problem")
-
-	sdl_result = SDL_Vulkan_GetInstanceExtensions(window, &required_extensions_count,
-	                                              r.required_extensions.data());
-
-	EXIT_NOT_IMPLEMENTED(sdl_result == SDL_FALSE);
-	EXIT_NOT_IMPLEMENTED(required_extensions_count == 0);
-	EXIT_NOT_IMPLEMENTED(required_extensions_count != r.required_extensions.size());
+	r.required_extensions.assign(extensions, extensions + required_extensions_count);
 
 	r.available_extensions =
 	    EnumerateVulkan<vk::ExtensionProperties>( // @suppress("Ambiguous problem")
@@ -889,7 +889,7 @@ void WindowContext::CreateVulkan() {
 	VULKAN_HPP_DEFAULT_DISPATCHER.init(get_instance_proc_addr);
 
 	VulkanExtensions r;
-	VulkanGetExtensions(window, r);
+	VulkanGetExtensions(r);
 	VulkanCheckInstanceVersion();
 
 	vk::ApplicationInfo app_info {};
@@ -976,15 +976,16 @@ void WindowContext::CreateVulkan() {
 	}
 
 	vk::SurfaceKHR::CType native_surface = VK_NULL_HANDLE;
-	if (SDL_Vulkan_CreateSurface(window, static_cast<vk::Instance::CType>(graphic_ctx.instance),
-	                             &native_surface) == SDL_FALSE) {
+	if (!SDL_Vulkan_CreateSurface(window, static_cast<vk::Instance::CType>(graphic_ctx.instance),
+	                              nullptr, &native_surface)) {
 		EXIT("Could not create a Vulkan surface");
 	}
 	surface = native_surface;
 
 	std::vector<const char*> device_extensions = {
 	    VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME,
-	    VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, "VK_KHR_maintenance1"};
+	    VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+	    "VK_KHR_maintenance1"};
 
 #if defined(__APPLE__)
 	// MoltenVK lacks VK_EXT_depth_clip_enable and VK_EXT_color_write_enable; the renderer
@@ -1089,8 +1090,8 @@ void WindowContext::RecreateSurface() {
 		surface = nullptr;
 	}
 	vk::SurfaceKHR::CType native_surface = VK_NULL_HANDLE;
-	if (SDL_Vulkan_CreateSurface(window, static_cast<vk::Instance::CType>(graphic_ctx.instance),
-	                             &native_surface) == SDL_FALSE) {
+	if (!SDL_Vulkan_CreateSurface(window, static_cast<vk::Instance::CType>(graphic_ctx.instance),
+	                              nullptr, &native_surface)) {
 		EXIT("Could not recreate the Vulkan surface: %s\n", SDL_GetError());
 	}
 	surface = native_surface;
@@ -1126,7 +1127,7 @@ WindowContext::~WindowContext() {
 		SDL_DestroyWindow(window);
 		window = nullptr;
 	}
-	SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
+	SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
 }
 
 } // namespace Libs::Graphics

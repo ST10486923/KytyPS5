@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -68,10 +69,6 @@ using KernelModule                   = int32_t;
 using get_thread_atexit_count_func_t = KYTY_SYSV_ABI int (*)(KernelModule);
 using thread_atexit_report_func_t    = KYTY_SYSV_ABI void (*)(KernelModule);
 
-static uint32_t sha1_rol(uint32_t value, uint32_t bits) {
-	return (value << bits) | (value >> (32u - bits));
-}
-
 static std::array<uint8_t, 20> sha1_digest(const uint8_t* data, size_t size) {
 	uint32_t h0 = 0x67452301u;
 	uint32_t h1 = 0xefcdab89u;
@@ -99,7 +96,7 @@ static std::array<uint8_t, 20> sha1_digest(const uint8_t* data, size_t size) {
 			       (static_cast<uint32_t>(msg[j + 2]) << 8u) | static_cast<uint32_t>(msg[j + 3]);
 		}
 		for (int i = 16; i < 80; i++) {
-			w[i] = sha1_rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+			w[i] = std::rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
 		}
 
 		uint32_t a = h0;
@@ -125,10 +122,10 @@ static std::array<uint8_t, 20> sha1_digest(const uint8_t* data, size_t size) {
 				k = 0xca62c1d6u;
 			}
 
-			const auto temp = sha1_rol(a, 5) + f + e + k + w[i];
+			const auto temp = std::rotl(a, 5) + f + e + k + w[i];
 			e               = d;
 			d               = c;
-			c               = sha1_rol(b, 30);
+			c               = std::rotl(b, 30);
 			b               = a;
 			a               = temp;
 		}
@@ -1229,6 +1226,7 @@ static KYTY_SYSV_ABI KernelModule KernelLoadStartModule(const char* module_file_
 
 	auto* program = rt->FindProgramByFileName(module_path);
 	if (program != nullptr) {
+		++program->load_count;
 		if (res != nullptr) {
 			*res = OK;
 		}
@@ -1243,6 +1241,7 @@ static KYTY_SYSV_ABI KernelModule KernelLoadStartModule(const char* module_file_
 
 	rt->RelocateProgram(program);
 
+	program->load_count = 1;
 	int result = rt->StartModule(program, args, argp, nullptr);
 
 	LOGF("\tmodule_start() result = %d\n", result);
@@ -1272,6 +1271,11 @@ static int KYTY_SYSV_ABI KernelStopUnloadModule(KernelModule handle, size_t args
 
 	if (program == nullptr) {
 		LOGF("\tinvalid module handle = %" PRId32 "\n", handle);
+		return KERNEL_ERROR_ESRCH;
+	}
+
+	if (program->load_count > 1) {
+		--program->load_count;
 		return OK;
 	}
 
@@ -3024,7 +3028,9 @@ LIB_DEFINE(InitLibKernel_1_FS) {
 	LIB_FUNC("Cg4srZ6TKbU", FileSystem::KernelRead);
 	LIB_FUNC("4wSze92BhLI", FileSystem::KernelWrite);
 	LIB_FUNC("+r3rMFwItV4", FileSystem::KernelPread);
+	LIB_FUNC("yTj62I7kw4s", FileSystem::KernelPreadv);
 	LIB_FUNC("nKWi-N2HBV4", FileSystem::KernelPwrite);
+	LIB_FUNC("mBd4AfLP+u8", FileSystem::KernelPwritev);
 	LIB_FUNC("eV9wAD2riIA", FileSystem::KernelStat);
 	LIB_FUNC("kBwCPsYX-m4", FileSystem::KernelFstat);
 	LIB_FUNC("AUXVxWeJU-A", FileSystem::KernelUnlink);

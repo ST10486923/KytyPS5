@@ -138,7 +138,7 @@ uint32_t EmitDppWriteCondition(ValueEmitContext& ctx, const IR::DppMoveFlags& fl
 	state.builder.AddFunction(spv::OpLogicalAnd, TypeBool(state), masks_ok, bank_ok, row_ok);
 	uint32_t writable = masks_ok;
 	if (!flags.bound_control) {
-		const auto target  = EmitDppTargetLane(state, flags.control);
+		const auto target  = EmitDppTargetLane(state, flags);
 		const auto bounded = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpLogicalAnd, TypeBool(state), bounded, writable,
 		                          target.valid);
@@ -559,6 +559,10 @@ void EmitVoid(ValueEmitContext&) {}
 
 void EmitBarrier(EmitterState& state) {
 	const auto tessellation = state.program.stage == ShaderType::TessellationControl;
+	if (!tessellation && ShaderWorkgroupInput(state.program.stage, state.input_info) == nullptr) {
+		// Independent graphics invocations have no native workgroup left to synchronize.
+		return;
+	}
 	const auto memory_scope = tessellation ? spv::ScopeInvocation : spv::ScopeWorkgroup;
 	const auto semantics    = tessellation ? spv::MemorySemanticsMaskNone
 	                                       : spv::MemorySemanticsAcquireReleaseMask |
@@ -611,7 +615,7 @@ uint32_t EmitUndefU1(EmitterState& state, const IR::Inst& inst) {
 uint32_t EmitDppMoveU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto&      state    = ctx.state;
 	const auto flags    = inst.Flags<IR::DppMoveFlags>();
-	const auto target   = EmitDppTargetLane(state, flags.control);
+	const auto target   = EmitDppTargetLane(state, flags);
 	const auto shuffled = ctx.Shuffle(inst, 0, target.lane);
 	if (flags.fetch_inactive) {
 		return shuffled;
@@ -630,6 +634,29 @@ uint32_t EmitDppUpdateU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto write = EmitDppWriteCondition(ctx, flags, ctx.Arg(inst, 2));
 	return EmitNative<spv::OpSelect, IR::Type::U32>(ctx.state, write, ctx.Arg(inst, 0),
 	                                                ctx.Arg(inst, 1));
+}
+
+uint32_t EmitConditionRef(ValueEmitContext& ctx, const IR::Inst& inst) {
+	if (ctx.other_half == nullptr) return ctx.Arg(inst, 0);
+	// A native scalar branch makes one decision for both emulated wave halves.
+	if (ctx.half != 0) return ctx.other_half->Def(IR::Value(&inst));
+	const auto kind = inst.Flags<CFG::BranchCondition>();
+	if (kind == CFG::BranchCondition::ScalarInstruction) return ctx.Arg(inst, 0);
+	const auto ballot = ctx.Ballot(inst.Arg(0));
+	const auto low = ctx.state.builder.AllocateId();
+	const auto high = ctx.state.builder.AllocateId();
+	const auto combined = ctx.state.builder.AllocateId();
+	const auto result = ctx.state.builder.AllocateId();
+	ctx.state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(ctx.state), low, ballot, 0);
+	ctx.state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(ctx.state), high, ballot, 1);
+	const bool zero = kind == CFG::BranchCondition::ExecZero ||
+	                  kind == CFG::BranchCondition::VccZero || kind == CFG::BranchCondition::SccZero;
+	ctx.state.builder.AddFunction(zero ? spv::OpBitwiseAnd : spv::OpBitwiseOr,
+	                              TypeU32(ctx.state), combined, low, high);
+	ctx.state.builder.AddFunction(zero ? spv::OpIEqual : spv::OpINotEqual,
+	                              TypeBool(ctx.state), result, combined,
+	                              ConstantU32(ctx.state, zero ? ~0u : 0u));
+	return result;
 }
 
 uint32_t EmitBallot(ValueEmitContext& ctx, IR::Value predicate) {

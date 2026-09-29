@@ -17,17 +17,17 @@ namespace Libs::Graphics {
 
 enum class VideoOutCompression : uint8_t { Uncompressed, Dcc256_256_0, Dcc256_64_64, Unsupported };
 
-enum class ImageMetadataKind : uint8_t { None, Htile, Dcc };
+enum class ImageMetadataKind : uint8_t { None, Htile, Dcc, Cmask };
 
 struct ImageMetadataInfo {
 	GuestRange          range;
-	ImageMetadataKind   kind               = ImageMetadataKind::None;
-	uint32_t            control            = 0;
-	uint32_t            dcc_clear_word           = 0;
-	VideoOutCompression compression        = VideoOutCompression::Uncompressed;
-	bool                stencil_compressed = false;
-	bool                dcc_clear_register_valid = false;
-	bool                dcc_alpha_msb            = true;
+	ImageMetadataKind   kind                 = ImageMetadataKind::None;
+	uint32_t            control              = 0;
+	uint32_t            clear_word           = 0;
+	VideoOutCompression compression          = VideoOutCompression::Uncompressed;
+	bool                stencil_compressed   = false;
+	bool                clear_register_valid = false;
+	bool                dcc_alpha_msb        = true;
 };
 
 struct ImageSubresources {
@@ -159,6 +159,7 @@ struct ImageViewInfo {
 	vk::ImageAspectFlags aspect      = vk::ImageAspectFlagBits::eColor;
 	uint32_t             base_level  = 0;
 	uint32_t             level_count = 1;
+	uint32_t             min_lod     = 0; // U4.8 clamp relative to base_level.
 	uint32_t             base_layer  = 0;
 	uint32_t             layer_count = 1;
 	vk::ComponentMapping mapping     = {};
@@ -167,9 +168,10 @@ struct ImageViewInfo {
 	[[nodiscard]] bool operator==(const ImageViewInfo& rhs) const noexcept {
 		return format == rhs.format && type == rhs.type && aspect == rhs.aspect &&
 		       base_level == rhs.base_level && level_count == rhs.level_count &&
-		       base_layer == rhs.base_layer && layer_count == rhs.layer_count &&
-		       mapping.r == rhs.mapping.r && mapping.g == rhs.mapping.g &&
-		       mapping.b == rhs.mapping.b && mapping.a == rhs.mapping.a && usage == rhs.usage;
+		       min_lod == rhs.min_lod && base_layer == rhs.base_layer &&
+		       layer_count == rhs.layer_count && mapping.r == rhs.mapping.r &&
+		       mapping.g == rhs.mapping.g && mapping.b == rhs.mapping.b &&
+		       mapping.a == rhs.mapping.a && usage == rhs.usage;
 	}
 };
 
@@ -327,7 +329,9 @@ struct VideoOutFormatPolicy {
 	VideoOutPixelFormatInfo info;
 };
 
-inline constexpr std::array<VideoOutFormatPolicy, 6> VIDEO_OUT_FORMAT_POLICIES {{
+inline constexpr uint64_t VIDEO_OUT_PIXEL_FORMAT_R10_G10_B10_A2_BT2100_PQ = 0x8100070422000000ull;
+
+inline constexpr std::array<VideoOutFormatPolicy, 7> VIDEO_OUT_FORMAT_POLICIES {{
     {0x8000000022000000ull,
      {vk::Format::eR8G8B8A8Srgb, Prospero::BufferFormat::k8_8_8_8Srgb, 4, false}},
     {0x8000000000000000ull,
@@ -336,6 +340,8 @@ inline constexpr std::array<VideoOutFormatPolicy, 6> VIDEO_OUT_FORMAT_POLICIES {
      {vk::Format::eA2B10G10R10UnormPack32, Prospero::BufferFormat::k10_10_10_2UNorm, 4, false}},
     {0x8100000000000000ull,
      {vk::Format::eA2R10G10B10UnormPack32, Prospero::BufferFormat::k10_10_10_2UNorm, 4, false}},
+    {VIDEO_OUT_PIXEL_FORMAT_R10_G10_B10_A2_BT2100_PQ,
+     {vk::Format::eA2B10G10R10UnormPack32, Prospero::BufferFormat::k10_10_10_2UNorm, 4, false}},
     {0xc001000622000000ull,
      {vk::Format::eR16G16B16A16Sfloat, Prospero::BufferFormat::k16_16_16_16Float, 8, false}},
     {0xc001000600000000ull,
